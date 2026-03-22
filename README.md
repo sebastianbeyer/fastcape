@@ -15,18 +15,24 @@ Romps for LCL computation, which leads to slightly different results from MetPy
 
 ## Installation
 
-### With pixi (recommended)
+### Add to an existing pixi project
 
 ```bash
-git clone <repo-url> && cd fastcape
-pixi install
-pixi run pip install -e .
+pixi add --pypi fastcape --git https://github.com/sebastianbeyer/fastcape
 ```
 
 ### With pip
 
 ```bash
-pip install -e .
+pip install git+https://github.com/sebastianbeyer/fastcape
+```
+
+### For development
+
+```bash
+git clone https://github.com/sebastianbeyer/fastcape && cd fastcape
+pixi install
+pixi run pip install -e .
 ```
 
 ## Usage
