@@ -7,12 +7,15 @@ from fastcape._numba_core import (
     _cape_cin_column,
     _dry_lapse,
     _lcl_bolton,
+    _ml_buoyancy_column,
     _ml_cape_cin_column,
     _moist_lapse_rk4,
+    _mu_buoyancy_column,
     _mu_cape_cin_column,
     _parcel_profile,
     _sat_mixing_ratio,
     _sat_vapor_pressure,
+    _sb_buoyancy_column,
     _virtual_temperature,
 )
 
@@ -232,3 +235,48 @@ class TestMLCAPE:
         cape, cin, lfc, el = _ml_cape_cin_column(p, T, Td)
         assert cape >= 0.0
         assert cin <= 0.0
+
+
+class TestBuoyancyProfile:
+    def test_sb_shape(self, high_cape_sounding):
+        """Surface-based buoyancy profile should have same length as pressure."""
+        p, T, Td = high_cape_sounding
+        B = _sb_buoyancy_column(p, T, Td)
+        assert B.shape == p.shape
+
+    def test_sb_positive_somewhere(self, high_cape_sounding):
+        """High-CAPE sounding should have positive buoyancy somewhere."""
+        p, T, Td = high_cape_sounding
+        B = _sb_buoyancy_column(p, T, Td)
+        assert np.any(B > 0), "Expected positive buoyancy in high-CAPE sounding"
+
+    def test_stable_no_positive(self, stable_sounding):
+        """Stable sounding should have no (or negligible) positive buoyancy."""
+        p, T, Td = stable_sounding
+        B = _sb_buoyancy_column(p, T, Td)
+        assert np.all(B < 0.05), f"Expected no positive buoyancy, max={np.max(B):.3f}"
+
+    def test_sb_surface_near_zero(self, high_cape_sounding):
+        """At the surface the parcel equals the environment, so B ~ 0."""
+        p, T, Td = high_cape_sounding
+        B = _sb_buoyancy_column(p, T, Td)
+        assert abs(B[0]) < 0.1, f"Surface buoyancy should be ~0, got {B[0]:.3f}"
+
+    def test_units_m_per_s2(self, high_cape_sounding):
+        """Buoyancy should be order 0.01-0.3 m/s^2 (not 1000s)."""
+        p, T, Td = high_cape_sounding
+        B = _sb_buoyancy_column(p, T, Td)
+        assert np.max(np.abs(B)) < 5.0, f"Buoyancy unreasonably large: {np.max(np.abs(B)):.1f}"
+
+    def test_mu_runs(self, high_cape_sounding):
+        """MU buoyancy profile should compute without error."""
+        p, T, Td = high_cape_sounding
+        B = _mu_buoyancy_column(p, T, Td)
+        assert B.shape == p.shape
+        assert np.any(B > 0)
+
+    def test_ml_runs(self, high_cape_sounding):
+        """ML buoyancy profile should compute without error."""
+        p, T, Td = high_cape_sounding
+        B = _ml_buoyancy_column(p, T, Td)
+        assert B.shape == p.shape

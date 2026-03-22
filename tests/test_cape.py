@@ -5,8 +5,11 @@ import pytest
 import xarray as xr
 
 from fastcape.cape import (
+    mixed_layer_buoyancy_profile,
     mixed_layer_cape_cin,
+    most_unstable_buoyancy_profile,
     most_unstable_cape_cin,
+    surface_based_buoyancy_profile,
     surface_based_cape_cin,
 )
 
@@ -132,3 +135,71 @@ class TestMixedLayerCAPE:
         )
         assert cape.values.item() >= 0.0
         assert cin.values.item() <= 0.0
+
+
+class TestBuoyancyProfile:
+    def test_sb_shape_and_dims(self, high_cape_sounding):
+        """Output should preserve spatial + vertical dimensions."""
+        p, T, Td = high_cape_sounding
+        ds = _make_sounding_dataset(p, T, Td, nx=2, ny=3)
+        B = surface_based_buoyancy_profile(
+            ds['pressure'], ds['temperature'], ds['dewpoint']
+        )
+        assert B.dims == ('x', 'y', 'level')
+        assert B.shape == (2, 3, len(p))
+
+    def test_sb_has_positive_buoyancy(self, high_cape_sounding):
+        """High-CAPE sounding should have positive buoyancy values."""
+        p, T, Td = high_cape_sounding
+        ds = _make_sounding_dataset(p, T, Td)
+        B = surface_based_buoyancy_profile(
+            ds['pressure'], ds['temperature'], ds['dewpoint']
+        )
+        assert np.any(B.values > 0)
+
+    def test_mu_runs(self, high_cape_sounding):
+        """MU buoyancy profile should compute via xarray."""
+        p, T, Td = high_cape_sounding
+        ds = _make_sounding_dataset(p, T, Td)
+        B = most_unstable_buoyancy_profile(
+            ds['pressure'], ds['temperature'], ds['dewpoint']
+        )
+        assert B.dims == ('x', 'y', 'level')
+
+    def test_ml_runs(self, high_cape_sounding):
+        """ML buoyancy profile should compute via xarray."""
+        p, T, Td = high_cape_sounding
+        ds = _make_sounding_dataset(p, T, Td)
+        B = mixed_layer_buoyancy_profile(
+            ds['pressure'], ds['temperature'], ds['dewpoint']
+        )
+        assert B.dims == ('x', 'y', 'level')
+
+    def test_dask(self, high_cape_sounding):
+        """Should work with dask-backed arrays."""
+        dask = pytest.importorskip("dask")
+        p, T, Td = high_cape_sounding
+        ds = _make_sounding_dataset(p, T, Td, nx=4, ny=4)
+        ds_chunked = ds.chunk({'x': 2, 'y': 2})
+
+        B = surface_based_buoyancy_profile(
+            ds_chunked['pressure'], ds_chunked['temperature'], ds_chunked['dewpoint']
+        )
+        assert hasattr(B.data, 'dask')
+        B_vals = B.compute().values
+        assert B_vals.shape == (4, 4, len(p))
+
+    def test_chunked_vs_unchunked(self, high_cape_sounding):
+        """Chunked and unchunked should give the same results."""
+        dask = pytest.importorskip("dask")
+        p, T, Td = high_cape_sounding
+        ds = _make_sounding_dataset(p, T, Td, nx=3, ny=3)
+        ds_chunked = ds.chunk({'x': 2, 'y': 2})
+
+        B1 = surface_based_buoyancy_profile(
+            ds['pressure'], ds['temperature'], ds['dewpoint']
+        )
+        B2 = surface_based_buoyancy_profile(
+            ds_chunked['pressure'], ds_chunked['temperature'], ds_chunked['dewpoint']
+        )
+        np.testing.assert_allclose(B1.values, B2.compute().values, rtol=1e-10)

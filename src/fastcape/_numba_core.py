@@ -360,6 +360,94 @@ def _integrate_cape_cin(p, tv_par, tv_env, p_lfc, p_el):
 
 
 @njit(cache=True)
+def _build_parcel_tv(pressure, temperature, dewpoint, T_parcel, Td_parcel, p_parcel):
+    """Build virtual temperature profiles for parcel and environment.
+
+    Parameters
+    ----------
+    pressure, temperature, dewpoint : 1D arrays
+        Full sounding [Pa, K, K], descending.
+    T_parcel, Td_parcel, p_parcel : float
+        Parcel starting conditions.
+
+    Returns
+    -------
+    tv_par : 1D array, parcel virtual temperature [K]
+    tv_env : 1D array, environment virtual temperature [K]
+    p_lcl  : float, LCL pressure [Pa]
+    """
+    n = len(pressure)
+    p_lcl, T_lcl = _lcl_bolton(p_parcel, T_parcel, Td_parcel)
+
+    prof = np.empty(n, dtype=np.float64)
+    split = n
+    for i in range(n):
+        if pressure[i] >= p_lcl:
+            prof[i] = _dry_lapse(pressure[i], T_parcel, p_parcel)
+        else:
+            split = i
+            break
+    if split < n:
+        moist_temps = _moist_lapse_rk4(pressure[split:], T_lcl, p_lcl)
+        for j in range(len(moist_temps)):
+            prof[split + j] = moist_temps[j]
+
+    w_parcel = _sat_mixing_ratio(p_parcel, Td_parcel)
+
+    tv_env = np.empty(n, dtype=np.float64)
+    tv_par = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        w_env = _sat_mixing_ratio(pressure[i], dewpoint[i])
+        tv_env[i] = _virtual_temperature(temperature[i], w_env)
+        if pressure[i] >= p_lcl:
+            tv_par[i] = _virtual_temperature(prof[i], w_parcel)
+        else:
+            w_sat = _sat_mixing_ratio(pressure[i], prof[i])
+            tv_par[i] = _virtual_temperature(prof[i], w_sat)
+
+    return tv_par, tv_env, p_lcl
+
+
+@njit(cache=True)
+def _find_lfc_el(pressure, tv_par, tv_env, p_lcl):
+    """Find LFC and EL from virtual temperature profiles.
+
+    Returns
+    -------
+    p_lfc : float, LFC pressure [Pa] (NaN if not found)
+    p_el  : float, EL pressure [Pa] (NaN if not found)
+    found : bool, True if buoyant region exists
+    el_found : bool, True if explicit EL intersection was found
+    """
+    NAN = np.nan
+    n = len(pressure)
+
+    start = 1
+    lfc_x, _ = _find_intersections(pressure[start:], tv_par[start:], tv_env[start:], 1)
+    if len(lfc_x) == 0:
+        any_positive = False
+        for i in range(n):
+            if pressure[i] < p_lcl and tv_par[i] > tv_env[i]:
+                any_positive = True
+                break
+        if not any_positive:
+            return NAN, NAN, False, False
+        p_lfc = p_lcl
+    else:
+        p_lfc = lfc_x[0]
+
+    el_x, _ = _find_intersections(pressure[start:], tv_par[start:], tv_env[start:], -1)
+    if len(el_x) == 0:
+        p_el = pressure[n - 1]
+        el_found = False
+    else:
+        p_el = el_x[len(el_x) - 1]
+        el_found = True
+
+    return p_lfc, p_el, True, el_found
+
+
+@njit(cache=True)
 def _compute_column(pressure, temperature, dewpoint, T_parcel, Td_parcel, p_parcel):
     """Core column computation: CAPE, CIN, LFC, EL from arbitrary parcel.
 
@@ -382,61 +470,14 @@ def _compute_column(pressure, temperature, dewpoint, T_parcel, Td_parcel, p_parc
     if n < 2:
         return 0.0, 0.0, NAN, NAN
 
-    # Build parcel profile
-    p_lcl, T_lcl = _lcl_bolton(p_parcel, T_parcel, Td_parcel)
+    tv_par, tv_env, p_lcl = _build_parcel_tv(
+        pressure, temperature, dewpoint, T_parcel, Td_parcel, p_parcel
+    )
 
-    prof = np.empty(n, dtype=np.float64)
-    split = n
-    for i in range(n):
-        if pressure[i] >= p_lcl:
-            prof[i] = _dry_lapse(pressure[i], T_parcel, p_parcel)
-        else:
-            split = i
-            break
-    if split < n:
-        moist_temps = _moist_lapse_rk4(pressure[split:], T_lcl, p_lcl)
-        for j in range(len(moist_temps)):
-            prof[split + j] = moist_temps[j]
+    p_lfc, p_el, found, el_found = _find_lfc_el(pressure, tv_par, tv_env, p_lcl)
+    if not found:
+        return 0.0, 0.0, NAN, NAN
 
-    # Virtual temperature correction
-    w_parcel = _sat_mixing_ratio(p_parcel, Td_parcel)
-
-    tv_env = np.empty(n, dtype=np.float64)
-    tv_par = np.empty(n, dtype=np.float64)
-    for i in range(n):
-        w_env = _sat_mixing_ratio(pressure[i], dewpoint[i])
-        tv_env[i] = _virtual_temperature(temperature[i], w_env)
-        if pressure[i] >= p_lcl:
-            tv_par[i] = _virtual_temperature(prof[i], w_parcel)
-        else:
-            w_sat = _sat_mixing_ratio(pressure[i], prof[i])
-            tv_par[i] = _virtual_temperature(prof[i], w_sat)
-
-    # Find LFC (first increasing intersection, skipping surface)
-    start = 1
-    lfc_x, _ = _find_intersections(pressure[start:], tv_par[start:], tv_env[start:], 1)
-    if len(lfc_x) == 0:
-        any_positive = False
-        for i in range(n):
-            if pressure[i] < p_lcl and tv_par[i] > tv_env[i]:
-                any_positive = True
-                break
-        if not any_positive:
-            return 0.0, 0.0, NAN, NAN
-        p_lfc = p_lcl
-    else:
-        p_lfc = lfc_x[0]  # bottom LFC (highest pressure)
-
-    # Find EL (last decreasing intersection)
-    el_x, _ = _find_intersections(pressure[start:], tv_par[start:], tv_env[start:], -1)
-    if len(el_x) == 0:
-        p_el = pressure[n - 1]
-        el_found = False
-    else:
-        p_el = el_x[len(el_x) - 1]  # top EL (lowest pressure)
-        el_found = True
-
-    # Integrate
     cape, cin = _integrate_cape_cin(pressure, tv_par, tv_env, p_lfc, p_el)
 
     return cape, cin, p_lfc, p_el if el_found else NAN
@@ -616,3 +657,153 @@ def _ml_cape_cin_batch(pressure_2d, temperature_2d, dewpoint_2d, depth_pa=10000.
             pressure_2d[i], temperature_2d[i], dewpoint_2d[i], depth_pa
         )
     return cape, cin, lfc, el
+
+
+# ---------------------------------------------------------------------------
+# Buoyancy profile
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _buoyancy_profile_column(pressure, temperature, dewpoint,
+                             T_parcel, Td_parcel, p_parcel):
+    """Compute buoyancy profile B(p) = g * (Tv_par - Tv_env) / Tv_env.
+
+    Parameters
+    ----------
+    pressure, temperature, dewpoint : 1D arrays
+        Full sounding [Pa, K, K], descending.
+    T_parcel, Td_parcel, p_parcel : float
+        Parcel starting conditions.
+
+    Returns
+    -------
+    buoyancy : 1D array [m/s^2], same length as pressure.
+        Positive = parcel warmer than environment.
+    """
+    n = len(pressure)
+    buoyancy = np.full(n, np.nan, dtype=np.float64)
+    if n < 2:
+        return buoyancy
+
+    tv_par, tv_env, _ = _build_parcel_tv(
+        pressure, temperature, dewpoint, T_parcel, Td_parcel, p_parcel
+    )
+
+    for i in range(n):
+        buoyancy[i] = c.g * (tv_par[i] - tv_env[i]) / tv_env[i]
+
+    return buoyancy
+
+
+@njit(cache=True)
+def _sb_buoyancy_column(pressure, temperature, dewpoint):
+    """Surface-based buoyancy profile for a single column."""
+    return _buoyancy_profile_column(
+        pressure, temperature, dewpoint,
+        temperature[0], dewpoint[0], pressure[0],
+    )
+
+
+@njit(cache=True)
+def _ml_buoyancy_column(pressure, temperature, dewpoint, depth_pa=10000.0):
+    """Mixed-layer buoyancy profile for a single column."""
+    n = len(pressure)
+    if n < 2:
+        return np.full(n, np.nan, dtype=np.float64)
+
+    p_bottom = pressure[0]
+    sum_T = 0.0
+    sum_Td = 0.0
+    sum_w = 0.0
+
+    for i in range(n):
+        if p_bottom - pressure[i] > depth_pa:
+            break
+        if i == 0:
+            dp = 0.5 * (pressure[0] - pressure[1]) if n > 1 else 1.0
+        elif i < n - 1 and p_bottom - pressure[i + 1] <= depth_pa:
+            dp = 0.5 * (pressure[i - 1] - pressure[i + 1])
+        else:
+            dp = 0.5 * (pressure[i - 1] - pressure[i])
+        sum_T += temperature[i] * dp
+        sum_Td += dewpoint[i] * dp
+        sum_w += dp
+
+    if sum_w <= 0.0:
+        return np.full(n, np.nan, dtype=np.float64)
+
+    T_mean = sum_T / sum_w
+    Td_mean = sum_Td / sum_w
+
+    return _buoyancy_profile_column(
+        pressure, temperature, dewpoint,
+        T_mean, Td_mean, p_bottom,
+    )
+
+
+@njit(cache=True)
+def _mu_buoyancy_column(pressure, temperature, dewpoint, depth_pa=30000.0):
+    """Most-unstable buoyancy profile for a single column."""
+    n = len(pressure)
+    if n < 2:
+        return np.full(n, np.nan, dtype=np.float64)
+
+    p_bottom = pressure[0]
+    max_theta_e = -1e30
+    best_idx = 0
+
+    for i in range(n):
+        if p_bottom - pressure[i] > depth_pa:
+            break
+        theta_e = _equivalent_potential_temperature_bolton(
+            pressure[i], temperature[i], dewpoint[i]
+        )
+        if theta_e > max_theta_e:
+            max_theta_e = theta_e
+            best_idx = i
+
+    return _buoyancy_profile_column(
+        pressure, temperature, dewpoint,
+        temperature[best_idx], dewpoint[best_idx], pressure[best_idx],
+    )
+
+
+@njit(parallel=True, cache=True)
+def _sb_buoyancy_batch(pressure_2d, temperature_2d, dewpoint_2d):
+    """Surface-based buoyancy profile for multiple columns.
+
+    Returns
+    -------
+    buoyancy : 2D array, shape (ncols, nlevels) [m/s^2]
+    """
+    ncols, nlevels = pressure_2d.shape
+    buoyancy = np.empty((ncols, nlevels), dtype=np.float64)
+    for i in prange(ncols):
+        buoyancy[i] = _sb_buoyancy_column(
+            pressure_2d[i], temperature_2d[i], dewpoint_2d[i]
+        )
+    return buoyancy
+
+
+@njit(parallel=True, cache=True)
+def _ml_buoyancy_batch(pressure_2d, temperature_2d, dewpoint_2d, depth_pa=10000.0):
+    """Mixed-layer buoyancy profile for multiple columns."""
+    ncols, nlevels = pressure_2d.shape
+    buoyancy = np.empty((ncols, nlevels), dtype=np.float64)
+    for i in prange(ncols):
+        buoyancy[i] = _ml_buoyancy_column(
+            pressure_2d[i], temperature_2d[i], dewpoint_2d[i], depth_pa
+        )
+    return buoyancy
+
+
+@njit(parallel=True, cache=True)
+def _mu_buoyancy_batch(pressure_2d, temperature_2d, dewpoint_2d, depth_pa=30000.0):
+    """Most-unstable buoyancy profile for multiple columns."""
+    ncols, nlevels = pressure_2d.shape
+    buoyancy = np.empty((ncols, nlevels), dtype=np.float64)
+    for i in prange(ncols):
+        buoyancy[i] = _mu_buoyancy_column(
+            pressure_2d[i], temperature_2d[i], dewpoint_2d[i], depth_pa
+        )
+    return buoyancy

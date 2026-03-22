@@ -92,6 +92,25 @@ cape, cin, lfc, el = mixed_layer_cape_cin(
 )
 ```
 
+### Buoyancy profile
+
+Vertical profile of parcel buoyancy B(p) = g (Tv,parcel - Tv,env) / Tv,env.
+Useful for determining bottom-heavy vs top-heavy CAPE:
+
+```python
+from fastcape import mixed_layer_buoyancy_profile
+
+B = mixed_layer_buoyancy_profile(
+    ds['pressure'], ds['temperature'], ds['dewpoint'],
+    vertical_dim='level',
+)
+# B: xr.DataArray [m/s^2], same shape as inputs
+# Positive = parcel warmer than environment (buoyant)
+```
+
+Also available as `surface_based_buoyancy_profile` and
+`most_unstable_buoyancy_profile`.
+
 ### Converting specific humidity to dewpoint
 
 If your data provides specific humidity instead of dewpoint (common for

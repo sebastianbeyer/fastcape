@@ -9,8 +9,11 @@ import numpy as np
 import xarray as xr
 
 from ._numba_core import (
+    _ml_buoyancy_batch,
     _ml_cape_cin_batch,
+    _mu_buoyancy_batch,
     _mu_cape_cin_batch,
+    _sb_buoyancy_batch,
     _sb_cape_cin_batch,
 )
 
@@ -138,6 +141,27 @@ _output_core_dims = [[], [], [], []]
 _output_dtypes = [np.float64] * 4
 
 
+def _make_buoyancy_wrapper(batch_func):
+    """Create an apply_ufunc wrapper for a buoyancy batch function returning a 2D array."""
+    def wrapper(pressure, temperature, dewpoint):
+        orig_shape = pressure.shape[:-1]
+        nlevels = pressure.shape[-1]
+        ncols = int(np.prod(orig_shape)) if len(orig_shape) > 0 else 1
+
+        p2d = np.ascontiguousarray(pressure.reshape(ncols, nlevels))
+        t2d = np.ascontiguousarray(temperature.reshape(ncols, nlevels))
+        td2d = np.ascontiguousarray(dewpoint.reshape(ncols, nlevels))
+
+        buoyancy = batch_func(p2d, t2d, td2d)
+        return buoyancy.reshape(orig_shape + (nlevels,))
+    return wrapper
+
+
+_sb_buoyancy_wrapper = _make_buoyancy_wrapper(_sb_buoyancy_batch)
+_mu_buoyancy_wrapper = _make_buoyancy_wrapper(_mu_buoyancy_batch)
+_ml_buoyancy_wrapper = _make_buoyancy_wrapper(_ml_buoyancy_batch)
+
+
 def surface_based_cape_cin(pressure, temperature, dewpoint, vertical_dim='level'):
     """Compute surface-based CAPE, CIN, LFC, and EL.
 
@@ -241,3 +265,94 @@ def mixed_layer_cape_cin(pressure, temperature, dewpoint, vertical_dim='level'):
         dask='parallelized',
         output_dtypes=_output_dtypes,
     )
+
+
+# ---------------------------------------------------------------------------
+# Buoyancy profile functions
+# ---------------------------------------------------------------------------
+
+def _buoyancy_apply(wrapper, pressure, temperature, dewpoint, vertical_dim):
+    """Shared apply_ufunc call for buoyancy profile functions."""
+    _validate_inputs(pressure, temperature, dewpoint, vertical_dim)
+    return xr.apply_ufunc(
+        wrapper,
+        pressure, temperature, dewpoint,
+        input_core_dims=[[vertical_dim]] * 3,
+        output_core_dims=[[vertical_dim]],
+        vectorize=False,
+        dask='parallelized',
+        output_dtypes=[np.float64],
+    )
+
+
+def surface_based_buoyancy_profile(pressure, temperature, dewpoint, vertical_dim='level'):
+    """Compute surface-based buoyancy profile.
+
+    B(p) = g * (Tv_parcel - Tv_env) / Tv_env  [m/s^2]
+
+    Positive values indicate the parcel is warmer (more buoyant) than the
+    environment. The integral of positive B in log-p space gives CAPE;
+    bottom-heavy vs top-heavy B indicates different convective character.
+
+    Parameters
+    ----------
+    pressure : xr.DataArray
+        Pressure [Pa], with a vertical dimension.
+    temperature : xr.DataArray
+        Temperature [K].
+    dewpoint : xr.DataArray
+        Dewpoint temperature [K].
+    vertical_dim : str
+        Name of the vertical dimension.
+
+    Returns
+    -------
+    buoyancy : xr.DataArray [m/s^2], same shape as inputs.
+    """
+    return _buoyancy_apply(_sb_buoyancy_wrapper, pressure, temperature, dewpoint, vertical_dim)
+
+
+def most_unstable_buoyancy_profile(pressure, temperature, dewpoint, vertical_dim='level'):
+    """Compute most-unstable buoyancy profile.
+
+    Uses the parcel with maximum theta_e in the bottom 300 hPa.
+
+    Parameters
+    ----------
+    pressure : xr.DataArray
+        Pressure [Pa].
+    temperature : xr.DataArray
+        Temperature [K].
+    dewpoint : xr.DataArray
+        Dewpoint temperature [K].
+    vertical_dim : str
+        Name of the vertical dimension.
+
+    Returns
+    -------
+    buoyancy : xr.DataArray [m/s^2], same shape as inputs.
+    """
+    return _buoyancy_apply(_mu_buoyancy_wrapper, pressure, temperature, dewpoint, vertical_dim)
+
+
+def mixed_layer_buoyancy_profile(pressure, temperature, dewpoint, vertical_dim='level'):
+    """Compute mixed-layer buoyancy profile.
+
+    Uses pressure-weighted mean T and Td over the bottom 100 hPa.
+
+    Parameters
+    ----------
+    pressure : xr.DataArray
+        Pressure [Pa].
+    temperature : xr.DataArray
+        Temperature [K].
+    dewpoint : xr.DataArray
+        Dewpoint temperature [K].
+    vertical_dim : str
+        Name of the vertical dimension.
+
+    Returns
+    -------
+    buoyancy : xr.DataArray [m/s^2], same shape as inputs.
+    """
+    return _buoyancy_apply(_ml_buoyancy_wrapper, pressure, temperature, dewpoint, vertical_dim)
