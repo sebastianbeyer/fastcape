@@ -1,0 +1,20 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Numba AOT cache
+*.nbi
+*.nbc
+
+# pytest
+.pytest_cache/
+
+# OS
+.DS_Store

@@ -1,0 +1,21 @@
+[workspace]
+authors = ["Sebastian Beyer <sebastian.beyer@awi.de>"]
+channels = ["conda-forge"]
+name = "fastcape"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+test = "pytest tests/ -v"
+bench = "python benchmarks/bench_cape.py"
+
+[dependencies]
+metpy = ">=1.7.1,<2"
+numba = ">=0.60"
+numpy = "*"
+xarray = "*"
+dask = "*"
+scipy = "*"
+pytest = "*"
+hatchling = "*"
+pip = "*"
